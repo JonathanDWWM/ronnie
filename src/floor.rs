@@ -378,6 +378,132 @@ pub fn shown(floor: Option<&[Entry]>, local: &[TypingScore], pseudo: Option<&str
     rows
 }
 
+/// A game's board on floor, kept as `Floor` keeps Speed Metal's: fetched in the background, the round
+/// just played sent with it. The minesweeper's (the fastest), Ronnie Run's (the farthest).
+pub struct GameFloor {
+    game: &'static str,
+    /// The smaller score wins (a time).
+    lower_wins: bool,
+    shared: Arc<Mutex<GameShared>>,
+    board: Option<Vec<GameEntry>>,
+    last: Option<f64>,
+    pending: Option<GameRound>,
+}
+
+/// A round to send: its score, and the body floor reads it from.
+#[derive(Clone, Debug)]
+pub struct GameRound {
+    pub score: u32,
+    pub details: serde_json::Value,
+}
+
+/// A line of a game's board.
+#[derive(Clone, Debug)]
+pub struct GameEntry {
+    /// Its place on floor's board (floor decides the ties).
+    pub rank: u32,
+    pub name: Option<String>,
+    pub score: u32,
+    pub me: bool,
+}
+
+#[derive(Default)]
+struct GameShared {
+    busy: bool,
+    /// The board, and the round not sent (floor unreachable).
+    done: Option<(Option<Vec<GameEntry>>, Option<GameRound>)>,
+}
+
+impl GameFloor {
+    pub fn new(game: &'static str, lower_wins: bool) -> Self {
+        Self { game, lower_wins, shared: Default::default(), board: None, last: None, pending: None }
+    }
+
+    /// floor's board when it answered, the best first.
+    pub fn board(&self) -> Option<&[GameEntry]> {
+        self.board.as_deref()
+    }
+
+    /// A round played: sent at the next sync (the best one, when several wait).
+    pub fn finished(&mut self, round: GameRound) {
+        let better = |p: &GameRound| if self.lower_wins { round.score < p.score } else { round.score > p.score };
+        if self.pending.as_ref().is_none_or(better) {
+            self.pending = Some(round);
+        }
+    }
+
+    /// Takes what a sync brought back.
+    pub fn poll(&mut self) {
+        let Some((board, unsent)) = self.shared.lock().ok().and_then(|mut s| s.done.take()) else { return };
+        if let Some(round) = unsent {
+            self.finished(round);
+        }
+        if board.is_some() {
+            self.board = board;
+        }
+    }
+
+    /// A sync, if the last one is older than `every` seconds (None: now). Without a pseudo, only the
+    /// board is fetched.
+    pub fn sync(&mut self, ctx: &egui::Context, now: f64, every: Option<f64>, account: Option<&FloorAccount>) {
+        if every.is_some_and(|every| self.last.is_some_and(|last| now - last < every)) {
+            return;
+        }
+        let Some(url) = url() else { return };
+        self.last = Some(now);
+        {
+            let Ok(mut shared) = self.shared.lock() else { return };
+            if shared.busy {
+                return;
+            }
+            shared.busy = true;
+        }
+        let account = account.filter(|a| a.url == url && a.name.is_some()).cloned();
+        let round = self.pending.take().filter(|_| account.is_some());
+        let (game, shared, ctx) = (self.game, self.shared.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let done = match game_sync(&url, game, account.as_ref(), round.as_ref()) {
+                Ok(board) => (Some(board), None),
+                Err(e) => {
+                    crate::log::info(&format!("floor: {e}"));
+                    // Refused by floor (out of its bounds): not tried again.
+                    (None, round.filter(|_| !matches!(e, ureq::Error::StatusCode(400..=499))))
+                }
+            };
+            if let Ok(mut shared) = shared.lock() {
+                shared.done = Some(done);
+                shared.busy = false;
+            }
+            ctx.request_repaint();
+        });
+    }
+}
+
+fn game_sync(url: &str, game: &str, account: Option<&FloorAccount>, round: Option<&GameRound>) -> Result<Vec<GameEntry>, ureq::Error> {
+    #[derive(Deserialize)]
+    struct Line {
+        rank: u32,
+        name: Option<String>,
+        score: u32,
+        me: bool,
+    }
+    #[derive(Deserialize)]
+    struct Answer {
+        entries: Vec<Line>,
+    }
+    let agent = agent();
+    // floor keeps the best one anyway.
+    if let (Some(account), Some(round)) = (account, round) {
+        agent.post(format!("{url}/v1/games/{game}/scores")).header("User-Agent", USER_AGENT).header("Authorization", format!("Bearer {}", account.token)).send_json(&round.details)?;
+    }
+    let mut request = agent.get(format!("{url}/v1/games/{game}/leaderboard")).query("limit", BOARD.to_string()).header("User-Agent", USER_AGENT);
+    if let Some(a) = account {
+        request = request.header("Authorization", format!("Bearer {}", a.token));
+    }
+    let answer: Answer = request.call()?.body_mut().read_json()?;
+    Ok(answer.entries.into_iter().map(|l| GameEntry { rank: l.rank, name: l.name, score: l.score, me: l.me }).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

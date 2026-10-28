@@ -37,6 +37,9 @@ mod library;
 mod mail;
 mod procs;
 mod mailhtml;
+mod mines;
+mod riff;
+mod runner;
 mod loading;
 mod motion;
 mod music;
@@ -47,6 +50,7 @@ mod upload;
 mod dev;
 mod modules;
 mod arcade;
+mod backstage;
 mod sqlcomplete;
 mod popups;
 mod profilebar;
@@ -317,6 +321,8 @@ struct WindowSlot {
     games_hub: bool,
     /// Which game: Speed Metal or Puissance 4.
     home_which: four::HomeGame,
+    /// The pane last shown of each kind of tab (see `last_tab_of`).
+    category_panes: Vec<(Category, PaneId)>,
     game: game::Game,
     ronnie_show: Option<(PaneId, f64)>,
     game_folded: bool,
@@ -370,10 +376,20 @@ pub struct App {
     versus: crate::live::Live,
     /// Puissance 4's page.
     four: four::Four,
+    /// The minesweeper's page.
+    mines: mines::Mines,
+    /// Ronnie Run's page.
+    runner: runner::Runner,
+    /// Riff Hero's page, and the song being played.
+    riff: riff::Riff,
+    /// Backstage's page.
+    backstage: backstage::Backstage,
     /// Ronnie.io's page, and its connection to floor.
     blob: blob::Blob,
     /// The sidebar showed the games at the last frame: the pseudo is asked on the way in.
     games_seen: bool,
+    /// The games whose page a window drew this frame: the others' stop at its end (see `leave_games`).
+    games_drawn: Vec<four::HomeGame>,
     /// Exporting or importing the configuration.
     backup: Option<backup::BackupDialog>,
     /// The automatic backup of the configuration.
@@ -558,6 +574,9 @@ pub struct App {
     games_hub: bool,
     /// Which game: Speed Metal or Puissance 4.
     home_which: four::HomeGame,
+    /// The pane last shown of each kind of tab (local, SSH, database): coming back to its category
+    /// shows its tab again.
+    category_panes: Vec<(Category, PaneId)>,
     game: game::Game,
     /// "ronnie" was typed in this pane: its show, since when (see `easter`).
     ronnie_show: Option<(PaneId, f64)>,
@@ -1189,8 +1208,13 @@ impl App {
             pseudo_prompt: None,
             versus: crate::live::Live::default(),
             four: four::Four::default(),
+            mines: mines::Mines::default(),
+            runner: runner::Runner::default(),
+            riff: riff::Riff::default(),
+            backstage: backstage::Backstage::default(),
             blob: blob::Blob::default(),
             games_seen: false,
+            games_drawn: Vec::new(),
             backup: None,
             auto_backup: backup::AutoBackupState::default(),
             backup_ask: None,
@@ -1269,6 +1293,7 @@ impl App {
             home_game: false,
             games_hub: false,
             home_which: four::HomeGame::SpeedMetal,
+            category_panes: Vec::new(),
             game: game::Game::default(),
             ronnie_show: None,
             game_folded: false,
@@ -1411,6 +1436,16 @@ impl App {
             if std::env::var("RONNIE_OPEN_BLOB").is_ok() {
                 app.splash = None;
                 app.open_blob();
+            }
+            // Riff Hero: "lobby", or "solo" (a song started).
+            if let Ok(riff) = std::env::var("RONNIE_OPEN_RIFF") {
+                app.splash = None;
+                app.open_riff();
+                app.riff_demo(&riff);
+            }
+            if std::env::var("RONNIE_OPEN_BACKSTAGE").is_ok() {
+                app.splash = None;
+                app.open_backstage();
             }
             if let Ok(page) = std::env::var("RONNIE_OPEN_SETTINGS") {
                 app.settings_dialog = true;
@@ -1921,6 +1956,7 @@ impl App {
         swap(&mut self.home_game, &mut slot.home_game);
         swap(&mut self.games_hub, &mut slot.games_hub);
         swap(&mut self.home_which, &mut slot.home_which);
+        swap(&mut self.category_panes, &mut slot.category_panes);
         swap(&mut self.game, &mut slot.game);
         swap(&mut self.ronnie_show, &mut slot.ronnie_show);
         swap(&mut self.game_folded, &mut slot.game_folded);
@@ -3453,8 +3489,12 @@ fn health_badge(ui: &mut Ui, rect: Rect, right: f32, id: PaneId, s: &crate::heal
     if let (Some((used, total)), Some(p)) = (s.mem, mem) {
         tip.push(t.health_mem.replace("{u}", &crate::health::bytes(used, units)).replace("{t}", &crate::health::bytes(total, units)).replace("{p}", &format!("{p:.0}")));
     }
-    if let (Some((used, total, mount)), Some(p)) = (&s.disk, disk) {
-        tip.push(t.health_disk.replace("{m}", mount).replace("{u}", &crate::health::bytes(*used, units)).replace("{t}", &crate::health::bytes(*total, units)).replace("{p}", &format!("{p:.0}")));
+    let disk_line = |text: &str, (used, total, mount): &(u64, u64, String)| text.replace("{m}", mount).replace("{u}", &crate::health::bytes(*used, units)).replace("{t}", &crate::health::bytes(*total, units)).replace("{p}", &format!("{:.0}", *used as f32 * 100.0 / *total as f32));
+    if !s.disks.is_empty() {
+        tip.push(t.health_disks.to_owned());
+        tip.extend(s.disks.iter().map(|d| disk_line(t.health_disks_line, d)));
+    } else if let Some(d) = &s.disk {
+        tip.push(disk_line(t.health_disk, d));
     }
     if let Some(up) = s.uptime {
         let (d, h, m) = (up.as_secs() / 86400, up.as_secs() / 3600 % 24, up.as_secs() / 60 % 60);
@@ -5027,6 +5067,7 @@ impl App {
             self.ssh_prompt_window(ui.ctx());
             self.live_frame(ui.ctx());
             self.blob_frame(ui.ctx());
+            self.riff_frame(ui.ctx());
             self.pseudo_window(ui.ctx());
         }
         self.poll_uploads();
@@ -5153,6 +5194,7 @@ impl eframe::App for App {
         self.window_ui(ui);
         self.other_windows(ui.ctx());
         self.tool_windows_ui(ui.ctx());
+        self.leave_games();
 
         // Errors shown to the user also go to ronnie.log, to diagnose them later.
         if self.error != self.logged_error {

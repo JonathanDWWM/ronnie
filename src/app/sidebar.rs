@@ -10,7 +10,6 @@ impl App {
         // The games' page: each game, to pick one.
         if self.home_game && self.games_hub {
             self.game.leave();
-            self.blob_leave();
             self.fold_for_game(false);
             self.arcade_page(ui, rect);
             return;
@@ -26,6 +25,7 @@ impl App {
                     return;
                 }
                 // It folds the sidebar itself, during a life.
+                self.games_drawn.push(super::four::HomeGame::Blob);
                 self.blob_page(ui, rect);
                 let dt = ui.input(|i| i.stable_dt).min(0.1);
                 if let Some(left) = self.count_blob(dt) {
@@ -33,8 +33,19 @@ impl App {
                 }
                 return;
             }
+            // These fold the sidebar themselves, during a run, a song, a show.
+            if self.home_game && matches!(self.home_which, super::four::HomeGame::Runner | super::four::HomeGame::Riff | super::four::HomeGame::Backstage) {
+                self.games_drawn.push(self.home_which);
+                return match self.home_which {
+                    super::four::HomeGame::Runner => self.runner_page(ui, rect),
+                    super::four::HomeGame::Riff => self.riff_page(ui, rect),
+                    _ => self.backstage_page(ui, rect),
+                };
+            }
             self.fold_for_game(false);
-            if self.home_game {
+            if self.home_game && self.home_which == super::four::HomeGame::Mines {
+                self.mines_page(ui, rect);
+            } else if self.home_game {
                 self.four_page(ui, rect);
             } else {
                 self.home_dashboard(ui, rect);
@@ -208,7 +219,8 @@ impl App {
         }
     }
 
-    /// The tab of `category` to show again: the active one if it is of it, else the last one of it.
+    /// The tab of `category` to show again: the active one if it is of it, else the one last shown
+    /// of it, else the last one of it.
     fn last_tab_of(&self, category: Category) -> Option<usize> {
         if !matches!(category, Category::Local | Category::Ssh | Category::Db) {
             return None;
@@ -216,7 +228,9 @@ impl App {
         if self.active < self.tabs.len() && self.tab_category(self.active) == category {
             return Some(self.active);
         }
-        (0..self.tabs.len()).rev().find(|&i| self.tab_category(i) == category)
+        let seen = self.category_panes.iter().find(|(c, _)| *c == category).map(|&(_, pane)| pane);
+        seen.and_then(|pane| (0..self.tabs.len()).find(|&i| self.tab_category(i) == category && self.tabs[i].panes.contains_key(&pane)))
+            .or_else(|| (0..self.tabs.len()).rev().find(|&i| self.tab_category(i) == category))
     }
 
     /// The category of a tab.
@@ -225,6 +239,15 @@ impl App {
             Some(tab) if tab.ssh.is_some() => Category::Ssh,
             Some(tab) if tab.db.is_some() => Category::Db,
             _ => Category::Local,
+        }
+    }
+
+    /// Notes the pane shown, for its category to show its tab again (see `last_tab_of`).
+    fn note_shown_pane(&mut self) {
+        if let Some(i) = self.shown_tab() {
+            let (category, pane) = (self.tab_category(i), self.tabs[i].focused);
+            self.category_panes.retain(|(c, _)| *c != category);
+            self.category_panes.push((category, pane));
         }
     }
 
@@ -366,7 +389,8 @@ impl App {
     }
 
     /// The "Games" category: Speed Metal (with the best score), Puissance 4 (with the players online),
-    /// Ronnie.io (with the best mass).
+    /// Ronnie.io (with the best mass), the minesweeper (with the best time), Ronnie Run (with the
+    /// farthest run), Riff Hero and Backstage (with the best score).
     fn games_section(&mut self, ui: &mut Ui, left: f32, row_w: f32, y: &mut f32) {
         use super::four::HomeGame;
         let t = self.t();
@@ -386,6 +410,10 @@ impl App {
                 HomeGame::SpeedMetal => super::paint_metal(&painter, icon, Align2::CENTER_CENTER, "R", 20.0, theme.accent, 1.0),
                 HomeGame::Four => super::four::paint_four_icon(&painter, icon, &theme, 1.0),
                 HomeGame::Blob => super::blob::paint_blob_icon(&painter, icon, &theme, 1.0),
+                HomeGame::Mines => super::mines::paint_mines_icon(&painter, icon, &theme, 1.0),
+                HomeGame::Runner => super::runner::paint_runner_icon(&painter, icon, &theme, 1.0),
+                HomeGame::Riff => super::riff::paint_riff_icon(&painter, icon, &theme, 1.0),
+                HomeGame::Backstage => super::backstage::paint_backstage_icon(&painter, icon, &theme, 1.0),
             }
             painter.text(Pos2::new(slot.min.x + 36.0, slot.center().y), Align2::LEFT_CENTER, name, FontId::proportional(13.0), if active || resp.hovered() { theme.text } else { theme.text_muted });
             if let Some(note) = note {
@@ -403,22 +431,47 @@ impl App {
         }
     }
 
-    /// The games, with their name and a note: the best score of Speed Metal and Ronnie.io, the
-    /// players online at Puissance 4; when played enough this half-day of work, when it's back.
-    pub(super) fn games_list(&mut self) -> [(super::four::HomeGame, &'static str, Option<String>); 3] {
+    /// The games, with their name and a note: the best score of Speed Metal, Ronnie.io, the
+    /// minesweeper, Ronnie Run, Riff Hero and Backstage, the players online at Puissance 4; when played enough this half-day of work, when
+    /// it's back.
+    pub(super) fn games_list(&mut self) -> [(super::four::HomeGame, &'static str, Option<String>); 7] {
         use super::four::HomeGame;
         let t = self.t();
         let pseudo = crate::floor::pseudo(self.config.settings.floor.as_ref()).map(str::to_owned);
         let best = self.config.settings.typing_scores.first().map(|s| s.letters.to_string());
         let online = (pseudo.is_some() && self.versus.reachable == Some(true)).then(|| t.four_online.replace("{n}", &self.versus.online.len().to_string()));
         let blob_best = (self.config.settings.blob_best > 0).then(|| self.config.settings.blob_best.to_string());
-        let mut games = [(HomeGame::SpeedMetal, "Speed Metal", best), (HomeGame::Four, t.four_name, online), (HomeGame::Blob, t.blob_name, blob_best)];
+        let runner_best = (self.config.settings.runner_best > 0).then(|| super::runner::meters_text(self.config.settings.runner_best));
+        let mines_best = (self.config.settings.mines_best > 0).then(|| super::mines::time_text(self.config.settings.mines_best));
+        let riff_best = self.config.settings.riff_bests.iter().max().filter(|&&b| b > 0).map(u32::to_string);
+        let backstage_best = (self.config.settings.backstage_best > 0).then(|| self.config.settings.backstage_best.to_string());
+        let mut games = [(HomeGame::SpeedMetal, "Speed Metal", best), (HomeGame::Four, t.four_name, online), (HomeGame::Blob, t.blob_name, blob_best), (HomeGame::Mines, t.mines_name, mines_best), (HomeGame::Runner, t.runner_name, runner_best), (HomeGame::Riff, t.riff_name, riff_best), (HomeGame::Backstage, t.backstage_name, backstage_best)];
         for (game, _, note) in &mut games {
             if let Some(p) = self.game_locked(*game) {
                 *note = Some(t.playtime_after.replace("{h}", &self.hour_text(p.end)));
             }
         }
         games
+    }
+
+    /// At the end of each frame: the games whose page no window drew (left for another game, a tab, the
+    /// games' page...) stop what was under way. Their state is the app's, shared by the windows: one
+    /// window can't stop them while another shows them.
+    pub(super) fn leave_games(&mut self) {
+        use super::four::HomeGame;
+        let drawn = std::mem::take(&mut self.games_drawn);
+        if !drawn.contains(&HomeGame::Blob) {
+            self.blob_leave();
+        }
+        if !drawn.contains(&HomeGame::Runner) {
+            self.runner.leave();
+        }
+        if !drawn.contains(&HomeGame::Riff) {
+            self.riff.leave();
+        }
+        if !drawn.contains(&HomeGame::Backstage) {
+            self.backstage.leave();
+        }
     }
 
     /// The games' page, on this window's home page.
@@ -434,6 +487,10 @@ impl App {
             HomeGame::SpeedMetal => self.open_game(),
             HomeGame::Four => self.open_four(),
             HomeGame::Blob => self.open_blob(),
+            HomeGame::Mines => self.open_mines(),
+            HomeGame::Runner => self.open_runner(),
+            HomeGame::Riff => self.open_riff(),
+            HomeGame::Backstage => self.open_backstage(),
         }
     }
 
@@ -832,6 +889,7 @@ impl App {
         let ctx = ui.ctx().clone();
         self.live = self.tabs.iter_mut().map(|tab| tab.panes.values_mut().find_map(|term| term.live_program(&ctx).map(str::to_owned))).collect();
         self.config.normalize();
+        self.note_shown_pane();
         let bar = ui.max_rect();
         ui.painter().rect_filled(bar, 0.0, self.theme.chrome_bg);
         ui.painter().vline(bar.max.x - 0.5, bar.y_range(), Stroke::new(1.0, self.theme.tab_hover));
@@ -1462,6 +1520,7 @@ impl App {
         self.live = self.tabs.iter_mut().map(|tab| tab.panes.values_mut().find_map(|term| term.live_program(&ctx).map(str::to_owned))).collect();
         // New profiles and hosts show up outside groups; deleted ones disappear.
         self.config.normalize();
+        self.note_shown_pane();
         self.follow_shown();
         let category = self.category();
         // On the way into the games, the pseudo, if there is none yet.

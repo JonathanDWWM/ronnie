@@ -2,6 +2,7 @@
 
 mod app;
 mod askpass;
+mod backstage;
 mod blob;
 mod awake;
 mod claude;
@@ -15,6 +16,9 @@ mod i18n;
 mod live;
 mod log;
 mod mailbox;
+mod mines;
+mod riff;
+mod runner;
 mod media_keys;
 mod modules;
 mod node;

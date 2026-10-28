@@ -7,7 +7,12 @@ use crate::playtime::{reseal, Period, BLOB_SECS};
 
 impl App {
     /// The half-day of work under way, what was played in it checked (see `crate::playtime::checked`).
+    /// Development builds, even in release, are never limited (the games are to be tried as often as
+    /// needed).
     fn work_period(&mut self) -> Option<Period> {
+        if !crate::config::OFFICIAL {
+            return None;
+        }
         crate::playtime::checked(&mut self.config.settings.game_usage, chrono::Local::now().naive_local())
     }
 
@@ -19,11 +24,16 @@ impl App {
             HomeGame::SpeedMetal => usage.speed_metal,
             HomeGame::Four => usage.four,
             HomeGame::Blob => usage.blob_secs >= BLOB_SECS,
+            HomeGame::Mines => usage.mines,
+            HomeGame::Runner => usage.runner,
+            HomeGame::Riff => usage.riff,
+            HomeGame::Backstage => usage.backstage,
         };
         used.then_some(p)
     }
 
-    /// A game of `game` under way: it is the half-day's (of Speed Metal or Puissance 4).
+    /// A game of `game` under way: it is the half-day's (of Speed Metal, Puissance 4, the minesweeper,
+    /// Ronnie Run, Riff Hero or Backstage).
     pub(super) fn count_round(&mut self, game: HomeGame) {
         if self.work_period().is_none() {
             return;
@@ -32,6 +42,10 @@ impl App {
         let played = match game {
             HomeGame::SpeedMetal => &mut usage.speed_metal,
             HomeGame::Four => &mut usage.four,
+            HomeGame::Mines => &mut usage.mines,
+            HomeGame::Runner => &mut usage.runner,
+            HomeGame::Riff => &mut usage.riff,
+            HomeGame::Backstage => &mut usage.backstage,
             HomeGame::Blob => return,
         };
         if !*played {
@@ -80,12 +94,20 @@ impl App {
             HomeGame::SpeedMetal => paint_metal(painter, icon, Align2::CENTER_CENTER, "R", 56.0, theme.accent, 1.0),
             HomeGame::Four => super::four::paint_four_icon(painter, icon, &theme, 2.6),
             HomeGame::Blob => super::blob::paint_blob_icon(painter, icon, &theme, 2.6),
+            HomeGame::Mines => super::mines::paint_mines_icon(painter, icon, &theme, 2.6),
+            HomeGame::Runner => super::runner::paint_runner_icon(painter, icon, &theme, 2.6),
+            HomeGame::Riff => super::riff::paint_riff_icon(painter, icon, &theme, 2.6),
+            HomeGame::Backstage => super::backstage::paint_backstage_icon(painter, icon, &theme, 2.6),
         }
         paint_metal(painter, Pos2::new(c.x, c.y - 50.0), Align2::CENTER_CENTER, t.playtime_title, 44.0, theme.accent, 1.0);
         let name = match game {
             HomeGame::SpeedMetal => "Speed Metal",
             HomeGame::Four => t.four_name,
             HomeGame::Blob => t.blob_name,
+            HomeGame::Mines => t.mines_name,
+            HomeGame::Runner => t.runner_name,
+            HomeGame::Riff => t.riff_name,
+            HomeGame::Backstage => t.backstage_name,
         };
         let why = match (game, p.morning) {
             (HomeGame::Blob, true) => t.playtime_blob_morning.to_owned(),
